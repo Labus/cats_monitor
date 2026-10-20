@@ -1,6 +1,20 @@
 import sqlite3
 from datetime import datetime, timezone, timedelta
 
+from telegram import (...)
+from telegram.ext import (...)
+
+# ======================== НАСТРОЙКИ ========================
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_@BotFather"
+DB_PATH = "cats.db"
+...
+Новый блок (замените им самый верх файла до TZ = ...):
+
+python
+import os
+import sqlite3
+from datetime import datetime, timezone, timedelta
+
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply,
 )
@@ -9,10 +23,27 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters,
 )
 
-# ======================== НАСТРОЙКИ ========================
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_@BotFather"
-DB_PATH = "cats.db"
+# Подхватываем .env, если установлен python-dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # работаем без .env — только на реальных переменных окружения
 
+# ======================== НАСТРОЙКИ ========================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Не задана переменная окружения BOT_TOKEN.\n"
+        "Установи её так:\n"
+        "  export BOT_TOKEN='123456:ABC...'      (Linux/macOS)\n"
+        "  set BOT_TOKEN=123456:ABC...           (Windows CMD)\n"
+        "  $env:BOT_TOKEN='123456:ABC...'        (PowerShell)\n"
+        "или создай файл .env рядом с bot.py со строкой:\n"
+        "  BOT_TOKEN=123456:ABC..."
+    )
+
+DB_PATH = os.environ.get("DB_PATH", "cats.db")
 TZ = timezone(timedelta(hours=3))
 TZ_LABEL = "МСК"
 
