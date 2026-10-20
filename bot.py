@@ -1,16 +1,3 @@
-import sqlite3
-from datetime import datetime, timezone, timedelta
-
-from telegram import (...)
-from telegram.ext import (...)
-
-# ======================== НАСТРОЙКИ ========================
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_@BotFather"
-DB_PATH = "cats.db"
-...
-Новый блок (замените им самый верх файла до TZ = ...):
-
-python
 import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
