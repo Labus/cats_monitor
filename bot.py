@@ -1,5 +1,4 @@
 import os
-import telegram
 import sqlite3
 from datetime import datetime, timezone, timedelta
 
@@ -16,7 +15,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # работаем без .env — только на реальных переменных окружения
+    pass
 
 # ======================== НАСТРОЙКИ ========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -27,11 +26,12 @@ if not BOT_TOKEN:
         "  export BOT_TOKEN='123456:ABC...'      (Linux/macOS)\n"
         "  set BOT_TOKEN=123456:ABC...           (Windows CMD)\n"
         "  $env:BOT_TOKEN='123456:ABC...'        (PowerShell)\n"
-        "или создай файл .env рядом с bot.py со строкой:\n"
+        "или создай файл .env рядом с bot.py:\n"
         "  BOT_TOKEN=123456:ABC..."
     )
 
 DB_PATH = os.environ.get("DB_PATH", "cats.db")
+
 TZ = timezone(timedelta(hours=3))
 TZ_LABEL = "МСК"
 
@@ -45,17 +45,17 @@ LITTER_REMINDER_HOURS = 24
 
 STATS_DAYS = 7
 CHART_BAR_WIDTH = 15
-HISTORY_LIMIT = 15        # сколько записей воды/лотка показывать
+HISTORY_LIMIT = 15
 
 CATS = ["Гафи", "Луна"]
-PIN_REFRESH_MIN = 10
+PIN_REFRESH_SEC = 30     # закреп обновляется каждые 30 секунд
 # ==========================================================
 
 MENU_TEXT = (
     "🐾 Бот учёта кормления котов.\n\n"
-    "Нажми кнопку, когда покормишь котов — я запомню время, "
-    "уведомлю второго человека, напомню, если долго не кормили, "
-    "покажу статистику, график и помогу вести вес каждого кота."
+    "Жми «Покормил котов», когда кормишь — я запомню время, "
+    "уведомлю второго человека и напомню, если долго не кормили. "
+    "Остальное — в подменю."
 )
 
 
@@ -107,9 +107,7 @@ def init_db() -> None:
     con.execute(
         "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
     )
-    row = con.execute(
-        "SELECT value FROM meta WHERE key = 'bot_start'"
-    ).fetchone()
+    row = con.execute("SELECT value FROM meta WHERE key = 'bot_start'").fetchone()
     if not row:
         con.execute(
             "INSERT INTO meta (key, value) VALUES (?, ?)",
@@ -228,8 +226,7 @@ def get_weight_history(cat: str, limit: int = 10):
 def save_water_change(user_id: int, username: str) -> None:
     con = sqlite3.connect(DB_PATH)
     con.execute(
-        "INSERT INTO water_changes (user_id, username, changed_at) "
-        "VALUES (?, ?, ?)",
+        "INSERT INTO water_changes (user_id, username, changed_at) VALUES (?, ?, ?)",
         (user_id, username, datetime.now(timezone.utc).isoformat()),
     )
     con.commit()
@@ -266,8 +263,7 @@ def get_water_total() -> int:
 def get_water_history(limit: int = HISTORY_LIMIT):
     con = sqlite3.connect(DB_PATH)
     rows = con.execute(
-        "SELECT username, changed_at FROM water_changes "
-        "ORDER BY id DESC LIMIT ?",
+        "SELECT username, changed_at FROM water_changes ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
     con.close()
@@ -278,8 +274,7 @@ def get_water_history(limit: int = HISTORY_LIMIT):
 def save_litter_cleaning(user_id: int, username: str) -> None:
     con = sqlite3.connect(DB_PATH)
     con.execute(
-        "INSERT INTO litter_cleanings (user_id, username, cleaned_at) "
-        "VALUES (?, ?, ?)",
+        "INSERT INTO litter_cleanings (user_id, username, cleaned_at) VALUES (?, ?, ?)",
         (user_id, username, datetime.now(timezone.utc).isoformat()),
     )
     con.commit()
@@ -316,8 +311,7 @@ def get_litter_total() -> int:
 def get_litter_history(limit: int = HISTORY_LIMIT):
     con = sqlite3.connect(DB_PATH)
     rows = con.execute(
-        "SELECT username, cleaned_at FROM litter_cleanings "
-        "ORDER BY id DESC LIMIT ?",
+        "SELECT username, cleaned_at FROM litter_cleanings ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
     con.close()
@@ -398,12 +392,13 @@ def format_dt(iso_str: str) -> str:
 
 
 def time_ago(iso_str: str) -> str:
+    """'только что' / '5 мин назад' / '2 ч 15 мин назад' / '3 д 4 ч назад'."""
     dt = datetime.fromisoformat(iso_str)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     sec = int((datetime.now(timezone.utc) - dt).total_seconds())
     if sec < 60:
-        return f"{sec} сек назад"
+        return "только что"
     mins = sec // 60
     if mins < 60:
         return f"{mins} мин назад"
@@ -434,7 +429,6 @@ def human_date(iso_str: str) -> str:
 
 
 def human_dt(iso_str: str) -> str:
-    """'сегодня 14:30', 'вчера 09:15', '3 дн. назад 20:00', '12.10.2026 20:00'."""
     dt = datetime.fromisoformat(iso_str).astimezone(TZ)
     delta = (datetime.now(TZ).date() - dt.date()).days
     hm = dt.strftime("%H:%M")
@@ -503,6 +497,9 @@ def build_pinned_text() -> str:
         else:
             lines.append(f"   • <b>{cat}</b>: нет данных")
 
+    now_str = datetime.now(TZ).strftime("%H:%M:%S")
+    lines.append("")
+    lines.append(f"<i>🔄 обновлено в {now_str} ({TZ_LABEL})</i>")
     return "\n".join(lines)
 
 
@@ -558,36 +555,39 @@ def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🐱 Покормил котов", callback_data="feed")],
+            [
+                InlineKeyboardButton("🧹 Прочие дела", callback_data="other_things"),
+                InlineKeyboardButton("⚖️ Вес котов", callback_data="weight"),
+            ],
+            [InlineKeyboardButton(
+                "📜 История / ⚙️ Настройки",
+                callback_data="history_settings",
+            )],
+        ]
+    )
+
+
+def other_things_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💧 Поменял воду", callback_data="water"),
+             InlineKeyboardButton("🧹 Убрал лоток", callback_data="litter")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")],
+        ]
+    )
+
+
+def history_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
             [InlineKeyboardButton("🕐 Последнее", callback_data="last"),
              InlineKeyboardButton("📜 История", callback_data="history")],
             [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
              InlineKeyboardButton("📈 График", callback_data="chart")],
-            [InlineKeyboardButton("⚖️ Вес котов", callback_data="weight")],
-            [InlineKeyboardButton("💧 Поменял воду", callback_data="water"),
-             InlineKeyboardButton("🧹 Убрал лоток", callback_data="litter")],
             [InlineKeyboardButton("📋 История воды", callback_data="water_history"),
              InlineKeyboardButton("📋 История лотка", callback_data="litter_history")],
+            [InlineKeyboardButton("🔄 Обновить сводку", callback_data="refresh_pin")],
             [InlineKeyboardButton("❌ Отменить последнее", callback_data="undo")],
-        ]
-    )
-
-
-def confirm_undo_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✅ Да, отменить", callback_data="undo_confirm")],
-            [InlineKeyboardButton("↩️ Нет, назад", callback_data="undo_cancel")],
-        ]
-    )
-
-
-def chart_keyboard(period: str = "days") -> InlineKeyboardMarkup:
-    days_label = "✓ По дням" if period == "days" else "По дням"
-    hours_label = "✓ По часам" if period == "hours" else "По часам"
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(days_label, callback_data="chart_days"),
-             InlineKeyboardButton(hours_label, callback_data="chart_hours")],
             [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")],
         ]
     )
@@ -611,7 +611,28 @@ def weight_history_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("⚖️ Записать вес", callback_data="weight")],
-            [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="weight")],
+        ]
+    )
+
+
+def confirm_undo_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Да, отменить", callback_data="undo_confirm")],
+            [InlineKeyboardButton("↩️ Нет, назад", callback_data="history_settings")],
+        ]
+    )
+
+
+def chart_keyboard(period: str = "days") -> InlineKeyboardMarkup:
+    days_label = "✓ По дням" if period == "days" else "По дням"
+    hours_label = "✓ По часам" if period == "hours" else "По часам"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(days_label, callback_data="chart_days"),
+             InlineKeyboardButton(hours_label, callback_data="chart_hours")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="history_settings")],
         ]
     )
 
@@ -621,7 +642,7 @@ def care_history_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("💧 Поменял воду", callback_data="water"),
              InlineKeyboardButton("🧹 Убрал лоток", callback_data="litter")],
-            [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="history_settings")],
         ]
     )
 
@@ -742,11 +763,8 @@ def build_water_history_message() -> str:
     total = get_water_total()
     week = get_water_count(STATS_DAYS)
     lines.append("")
-    lines.append(
-        f"Всего: <b>{total}</b> раз, за {STATS_DAYS} дн.: <b>{week}</b>"
-    )
+    lines.append(f"Всего: <b>{total}</b> раз, за {STATS_DAYS} дн.: <b>{week}</b>")
     if len(rows) >= 2:
-        # средний интервал по показанным записям
         newest = datetime.fromisoformat(rows[0][1])
         oldest = datetime.fromisoformat(rows[-1][1])
         span = (newest - oldest).total_seconds() / 3600
@@ -769,9 +787,7 @@ def build_litter_history_message() -> str:
     total = get_litter_total()
     week = get_litter_count(STATS_DAYS)
     lines.append("")
-    lines.append(
-        f"Всего: <b>{total}</b> раз, за {STATS_DAYS} дн.: <b>{week}</b>"
-    )
+    lines.append(f"Всего: <b>{total}</b> раз, за {STATS_DAYS} дн.: <b>{week}</b>")
     if len(rows) >= 2:
         newest = datetime.fromisoformat(rows[0][1])
         oldest = datetime.fromisoformat(rows[-1][1])
@@ -920,7 +936,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             arrow = weight_arrow(w, hist[i + 1][0])
         lines.append(f"   • {human_date(iso)} — {w:.1f} кг{arrow}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", reply_markup=main_keyboard()
+    )
     await update_all_pins(context)
 
 
@@ -936,6 +954,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     data = query.data
     await query.answer()
+
+    # ---------- ПОДМЕНЮ ----------
+    if data == "other_things":
+        text = "🧹 <b>Прочие дела</b>\n\nВыбери действие:"
+        kb = other_things_keyboard()
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data == "history_settings":
+        text = "📜 <b>История и настройки</b>\n\nВыбери действие:"
+        kb = history_settings_keyboard()
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data == "back_to_menu":
+        try:
+            await query.edit_message_text(
+                MENU_TEXT, parse_mode="HTML", reply_markup=main_keyboard()
+            )
+        except Exception:
+            await query.message.reply_text(
+                MENU_TEXT, parse_mode="HTML", reply_markup=main_keyboard()
+            )
+        return
+
+    # ---------- ОБНОВИТЬ СВОДКУ ----------
+    if data == "refresh_pin":
+        await update_all_pins(context)
+        await query.answer("Сводка обновлена ✅")
+        return
 
     # ---------- ГРАФИК ----------
     if data in ("chart", "chart_days", "chart_hours"):
@@ -982,18 +1036,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if data == "weight_history":
+        text = build_weight_history_message()
+        kb = weight_history_keyboard()
         try:
-            await query.edit_message_text(
-                build_weight_history_message(),
-                parse_mode="HTML",
-                reply_markup=weight_history_keyboard(),
-            )
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         except Exception:
-            await query.message.reply_text(
-                build_weight_history_message(),
-                parse_mode="HTML",
-                reply_markup=weight_history_keyboard(),
-            )
+            await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
     # ---------- ВОДА / ЛОТОК ----------
@@ -1005,7 +1053,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if prev:
             text += f"\nПредыдущий раз: {time_ago(prev[2])} ({prev[1]})"
         await query.message.reply_text(
-            text, parse_mode="HTML", reply_markup=main_keyboard()
+            text, parse_mode="HTML", reply_markup=other_things_keyboard()
         )
         await update_all_pins(context)
         return
@@ -1018,7 +1066,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if prev:
             text += f"\nПредыдущий раз: {time_ago(prev[2])} ({prev[1]})"
         await query.message.reply_text(
-            text, parse_mode="HTML", reply_markup=main_keyboard()
+            text, parse_mode="HTML", reply_markup=other_things_keyboard()
         )
         await update_all_pins(context)
         return
@@ -1046,14 +1094,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         last = get_last_feeding()
         if not last:
             await query.message.reply_text(
-                "Нечего отменять — история пуста.", reply_markup=main_keyboard()
+                "Нечего отменять — история пуста.",
+                reply_markup=history_settings_keyboard(),
             )
             return
         await query.edit_message_reply_markup(reply_markup=confirm_undo_keyboard())
         return
 
     if data == "undo_cancel":
-        await query.edit_message_reply_markup(reply_markup=main_keyboard())
+        await query.edit_message_reply_markup(reply_markup=history_settings_keyboard())
         return
 
     if data == "undo_confirm":
@@ -1077,23 +1126,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     )
                 except Exception:
                     pass
-        await query.edit_message_text(text, reply_markup=main_keyboard())
+        await query.edit_message_text(
+            text, reply_markup=history_settings_keyboard()
+        )
         await update_all_pins(context)
         return
 
-    # ---------- НАЗАД ----------
-    if data == "back_to_menu":
-        try:
-            await query.edit_message_text(
-                MENU_TEXT, parse_mode="HTML", reply_markup=main_keyboard()
-            )
-        except Exception:
-            await query.message.reply_text(
-                MENU_TEXT, parse_mode="HTML", reply_markup=main_keyboard()
-            )
-        return
-
-    # ---------- ОСНОВНЫЕ ----------
+    # ---------- ИСТОРИЯ / СТАТИСТИКА ----------
     if data == "feed":
         name = user.first_name or (user.username or "Кто-то")
         save_feeding(user.id, name)
@@ -1107,8 +1146,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(text, reply_markup=main_keyboard())
         await notify_partner(context, user.id, last["username"], last["fed_at"])
         await update_all_pins(context)
+        return
 
-    elif data == "last":
+    if data == "last":
         last = get_last_feeding()
         if not last:
             text = "Пока никто не кормил котов 😿"
@@ -1119,9 +1159,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"🍽 Кормил(а): {last['username']}\n"
                 f"⏳ {time_ago(last['fed_at'])}"
             )
-        await query.message.reply_text(text, reply_markup=main_keyboard())
+        await query.message.reply_text(
+            text, reply_markup=history_settings_keyboard(), parse_mode="HTML"
+        )
+        return
 
-    elif data == "history":
+    if data == "history":
         rows = get_history(15)
         if not rows:
             text = "История пуста 😿"
@@ -1133,12 +1176,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     f"({time_ago(r['fed_at'])})"
                 )
             text = "\n".join(lines)
-        await query.message.reply_text(text, reply_markup=main_keyboard())
-
-    elif data == "stats":
         await query.message.reply_text(
-            build_stats_message(), reply_markup=main_keyboard(), parse_mode="HTML"
+            text, reply_markup=history_settings_keyboard()
         )
+        return
+
+    if data == "stats":
+        await query.message.reply_text(
+            build_stats_message(),
+            reply_markup=history_settings_keyboard(),
+            parse_mode="HTML",
+        )
+        return
 
 
 # ---------------- ЗАПУСК ----------------
@@ -1161,7 +1210,7 @@ def main() -> None:
             care_reminder_job, interval=REMINDER_CHECK_MIN * 60, first=120
         )
         app.job_queue.run_repeating(
-            pinned_refresh_job, interval=PIN_REFRESH_MIN * 60, first=180
+            pinned_refresh_job, interval=PIN_REFRESH_SEC, first=20
         )
     else:
         print('⚠️ JobQueue недоступен — установи: pip install "python-telegram-bot[job-queue]"')
