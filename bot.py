@@ -498,13 +498,26 @@ async def update_pin_for_chat(context, chat_id, text):
             )
             return
         except Exception as e:
-            if "message is not modified" in str(e).lower():
+            err = str(e).lower()
+            if "message is not modified" in err:
                 return
             print(f"[pin] edit failed {chat_id}: {e}")
-            try:
-                await context.bot.unpin_chat_message(chat_id=chat_id, message_id=int(old))
-            except Exception:
-                pass
+            # сообщение могло быть удалено/чат закрыт — забудем про него
+            if any(x in err for x in (
+                "message to edit not found",
+                "message can't be edited",
+                "message_id_invalid",
+                "chat not found",
+            )):
+                set_meta(f"pinned_msg_{chat_id}", "")
+            else:
+                try:
+                    await context.bot.unpin_chat_message(
+                        chat_id=chat_id, message_id=int(old)
+                    )
+                except Exception:
+                    pass
+
     try:
         msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         set_meta(f"pinned_msg_{chat_id}", msg.message_id)
@@ -513,7 +526,17 @@ async def update_pin_for_chat(context, chat_id, text):
                 chat_id=chat_id, message_id=msg.message_id, disable_notification=True
             )
         except Exception as e:
-            print(f"[pin] pin failed {chat_id}: {e} (бот должен быть админом в группе)")
+            err = str(e).lower()
+            print(f"[pin] pin failed {chat_id}: {e}")
+            # Если нет прав — скажем в чат, чтобы человек понял, что делать
+            if "not enough rights" in err or "chat_admin_required" in err:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="⚠️ Не могу закрепить сводку — сделайте бота админом с правом «Закреплять сообщения».",
+                    )
+                except Exception:
+                    pass
     except Exception as e:
         print(f"[pin] send failed {chat_id}: {e}")
 
