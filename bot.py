@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import random
 from datetime import datetime, timezone, timedelta
 
 from telegram import (
@@ -15,7 +16,12 @@ try:
     load_dotenv()
 except ImportError:
     pass
-
+#===Стикеры====
+STICKER_IDS = [
+    "AAMCAgADGQEAAVdccGru2cpD250NdAtyZ-jrQuRumybjAALbWwACF7pZSjS99FPMnbZxAQAHbQADPQQ",  
+    "AAMCAgADGQEAAVdcfmru2pHptoS-sVd_q7uuK0QuO6BiAAI_rAACw7JwS4kGUDwSn2WYAQAHbQADPQQ",  
+    "AAMCAgADGQEAAVdcgmru2stu95R3rAUAAcWB59naVoTiZgACTKwAAsOycEvWijtiXvx5BQEAB20AAz0E",  
+]
 # ======================== НАСТРОЙКИ ========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -902,6 +908,17 @@ async def do_feed(update, context):
         f"🍽 Кормил(а): {last['username']}\n"
        # f"⏳ {time_ago(last['fed_at'])}"
     )
+    sticker_to_send = random.choice(STICKER_IDS)
+    
+    try:
+        await context.bot.send_sticker(
+            chat_id=update.effective_chat.id,
+            sticker=sticker_to_send,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=main_reply_kb()
+        )
+        
     await update.message.reply_text(text, reply_markup=main_reply_kb())
     await notify_partner(context, user.id, last["username"], last["fed_at"])
     await update_all_pins(context)
