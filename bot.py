@@ -21,15 +21,12 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError(
         "Не задана переменная окружения BOT_TOKEN.\n"
-        "Установи её так:\n"
-        "  export BOT_TOKEN='123456:ABC...'      (Linux/macOS)\n"
-        "  set BOT_TOKEN=123456:ABC...           (Windows CMD)\n"
-        "  $env:BOT_TOKEN='123456:ABC...'        (PowerShell)\n"
-        "или создай файл .env рядом с bot.py:\n"
-        "  BOT_TOKEN=123456:ABC..."
     )
 
-DB_PATH = os.environ.get("DB_PATH", "cats.db")
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(DATA_DIR, "cats.db")
 
 TZ = timezone(timedelta(hours=3))
 TZ_LABEL = "МСК"
@@ -47,6 +44,10 @@ HISTORY_LIMIT = 15
 
 CATS = ["Гафи", "Луна"]
 PIN_REFRESH_SEC = 30
+# ---- Еженедельное напоминание о весе ----
+WEIGHT_REMINDER_WEEKDAY = 6   # 0=Пн, 1=Вт, ..., 6=Вс
+WEIGHT_REMINDER_HOUR = 12     # час по TZ, когда присылать
+WEIGHT_REMINDER_DAYS = 7      # не напоминать про кота, взвешенного N дней назад
 # ==========================================================
 
 # ------------- ТЕКСТЫ КНОПОК -------------
@@ -65,17 +66,13 @@ BTN_STATS = "📊 Статистика"
 BTN_CHART = "📈 График"
 BTN_WATER_HISTORY = "📋 История воды"
 BTN_LITTER_HISTORY = "📋 История лотка"
-BTN_REFRESH = "🔄 Обновить сводку"
 BTN_UNDO = "❌ Отменить последнее"
 
 BTN_WEIGHT_HISTORY = "📊 История веса"
 BTN_WEIGHT_CAT = {cat: f"⚖️ {cat}" for cat in CATS}
 
 MENU_TEXT = (
-    "🐾 <b>Бот учёта кормления котов</b>\n\n"
-    "Жми «Покормил котов», когда кормишь — запомню время, "
-    "уведомлю второго человека и напомню, если долго не кормили. "
-    "Остальное — в кнопках внизу."
+    "🐾 "
 )
 OTHER_TEXT = "🧹 <b>Прочие дела</b>\n\nВыбери действие:"
 WEIGHT_TEXT = "⚖️ <b>Вес котов</b>\n\nВыбери кота, чтобы записать вес:"
@@ -550,6 +547,97 @@ async def update_all_pins(context):
 async def pinned_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     await update_all_pins(context)
 
+    # ---------------- НАПОМИНАНИЕ О ВЕСЕ ----------------
+async def weekly_weight_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(TZ)
+    if now.weekday() != WEIGHT_REMINDER_WEEKDAY:
+        return
+    if now.hour < WEIGHT_REMINDER_HOUR:
+        return
+
+    # защита от повторной отправки за ту же неделю
+    iso = now.isocalendar()
+    week_key = f"{iso[0]}-W{iso[1]:02d}"
+    if get_meta("last_weight_reminder_week") == week_key:
+        return
+
+    need = []  # [(cat, last_iso|None)]
+    for cat in CATS:
+        row = get_last_weight(cat)
+        if not row:
+            need.append((cat, None))
+            continue
+        last_iso = row[1]
+        if hours_since(last_iso) >= WEIGHT_REMINDER_DAYS * 24:
+            need.append((cat, last_iso))
+
+    if not need:
+        # всех взвесили недавно — фиксируем неделю и молчим
+        set_meta("last_weight_reminder_week", week_key)
+        return
+
+    lines = ["⚖️ <b>Пора взвесить котов!</b>", ""]
+    for cat, last_iso in need:
+        if last_iso is None:
+            lines.append(f"• <b>{cat}</b> — ещё ни разу не взвешивали")
+        else:
+            lines.append(
+                f"• <b>{cat}</b> — последний раз {human_date(last_iso)} "
+                f"({time_ago(last_iso)})"
+            )
+    lines.append("")
+    lines.append("Жми «⚖️ Вес котов» в меню и запиши текущий вес.")
+
+    text = "\n".join(lines)
+    sent = False
+    for uid in get_recipients():
+        try:
+            await context.bot.send_message(
+                chat_id=uid, text=text,
+                reply_markup=main_reply_kb(), parse_mode="HTML",
+            )
+            sent = True
+        except Exception as e:
+            print(f"[weight_reminder] {uid}: {e}")
+    if sent:
+        set_meta("last_weight_reminder_week", week_key)
+
+
+async def cmd_remind_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной триггер — для проверки, что всё работает."""
+    if ALLOWED_USERS and update.effective_user.id not in ALLOWED_USERS:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    # имитируем «наступило воскресенье 12:00» — сбрасываем флаг недели
+    set_meta("last_weight_reminder_week", "")
+    await update.message.reply_text("⏳ Проверяю, кого надо взвесить…")
+    await weekly_weight_reminder_job(context)
+
+
+async def cmd_weight_reminder_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    weekday_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    wd = weekday_names[WEIGHT_REMINDER_WEEKDAY]
+
+    lines = ["⚖️ <b>Напоминание о взвешивании</b>", ""]
+    lines.append(f"📅 Каждую неделю: <b>{wd}, {WEIGHT_REMINDER_HOUR:02d}:00</b> ({TZ_LABEL})")
+    lines.append(f"⏳ Порог: напоминать про кота, если не взвешивали ≥ {WEIGHT_REMINDER_DAYS} дн.")
+    last = get_meta("last_weight_reminder_week")
+    lines.append(f"🗓 Последний раз присылалось: <b>{last or '—'}</b>")
+    lines.append("")
+    lines.append("<b>Сейчас:</b>")
+    for cat in CATS:
+        row = get_last_weight(cat)
+        if not row:
+            lines.append(f"• <b>{cat}</b> — нет данных, надо взвесить")
+        else:
+            w, iso = row
+            h = hours_since(iso)
+            flag = "✅" if h < WEIGHT_REMINDER_DAYS * 24 else "⚠️"
+            lines.append(
+                f"• {flag} <b>{cat}</b>: {w:.1f} кг, {human_date(iso)} "
+                f"({time_ago(iso)})"
+            )
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 # ---------------- КЛАВИАТУРЫ (ReplyKeyboard) ----------------
 def main_reply_kb():
@@ -583,7 +671,6 @@ def history_settings_reply_kb():
             [BTN_LAST, BTN_FEED_HISTORY],
             [BTN_STATS, BTN_CHART],
             [BTN_WATER_HISTORY, BTN_LITTER_HISTORY],
-            [BTN_REFRESH],
             [BTN_UNDO],
             [BTN_BACK],
         ],
@@ -735,7 +822,7 @@ async def notify_partner(context, feeder_id, feeder_name, fed_at_iso):
     text = (
         f"🐱 {feeder_name} покормил(а) котов!\n"
         f"🕐 {format_dt(fed_at_iso)}\n"
-        f"⏳ {time_ago(fed_at_iso)}"
+       # f"⏳ {time_ago(fed_at_iso)}"
     )
     for uid in others:
         try:
@@ -813,7 +900,7 @@ async def do_feed(update, context):
         "✅ Записано!\n\n"
         f"🕐 {format_dt(last['fed_at'])}\n"
         f"🍽 Кормил(а): {last['username']}\n"
-        f"⏳ {time_ago(last['fed_at'])}"
+       # f"⏳ {time_ago(last['fed_at'])}"
     )
     await update.message.reply_text(text, reply_markup=main_reply_kb())
     await notify_partner(context, user.id, last["username"], last["fed_at"])
@@ -902,10 +989,12 @@ async def do_litter_history(update, context):
     )
 
 
-async def do_refresh(update, context):
+async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USERS and update.effective_user.id not in ALLOWED_USERS:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
     await update_all_pins(context)
-    await update.message.reply_text("🔄 Сводка обновлена ✅", reply_markup=history_settings_reply_kb())
-
+    await update.message.reply_text("🔄 Сводка обновлена ✅")
 
 async def do_undo_prompt(update, context):
     last = get_last_feeding()
@@ -959,6 +1048,25 @@ async def show_history_settings(update, context):
     await update.message.reply_text(
         HISTORY_TEXT, reply_markup=history_settings_reply_kb(), parse_mode="HTML"
     )
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🐾 <b>Команды бота</b>\n"
+        "\n"
+        "⚙️ <b>Служебные</b>\n"
+        "/start — главное меню\n"
+        "/help — этот список команд\n"
+        "/id — узнать свой Telegram ID\n"
+        "\n"
+        "🔄 <b>Сводка</b>\n"
+        "/refresh — принудительно обновить закреплённую сводку\n"
+        "\n"
+        "⚖️ <b>Напоминания о весе</b>\n"
+        "/remind_weight — прислать напоминание взвесить котов сейчас\n"
+        "/weight_reminder — показать настройки напоминаний и текущий статус\n"
+    )
+    await update.message.reply_text(
+        text, parse_mode="HTML", reply_markup=main_reply_kb()
+    )
 
 
 # ---------------- КАРТА КНОПОК ----------------
@@ -989,8 +1097,6 @@ async def _dispatch_by_text(update, context, text):
         await do_water_history(update, context)
     elif text == BTN_LITTER_HISTORY:
         await do_litter_history(update, context)
-    elif text == BTN_REFRESH:
-        await do_refresh(update, context)
     elif text == BTN_UNDO:
         await do_undo_prompt(update, context)
     elif text == BTN_WEIGHT_HISTORY:
@@ -1006,7 +1112,7 @@ ALL_BUTTON_TEXTS = {
     BTN_FEED, BTN_OTHER, BTN_WEIGHT, BTN_HISTORY,
     BTN_WATER, BTN_LITTER, BTN_BACK,
     BTN_LAST, BTN_FEED_HISTORY, BTN_STATS, BTN_CHART,
-    BTN_WATER_HISTORY, BTN_LITTER_HISTORY, BTN_REFRESH, BTN_UNDO,
+    BTN_WATER_HISTORY, BTN_LITTER_HISTORY, BTN_UNDO,
     BTN_WEIGHT_HISTORY,
     *BTN_WEIGHT_CAT.values(),
 }
@@ -1028,6 +1134,13 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
+async def pin_here(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    add_known_chat(chat_id)
+    # сбросим id старого закрепа в этом чате, чтобы создать заново
+    set_meta(f"pinned_msg_{chat_id}", "")
+    await update_pin_for_chat(context, chat_id, build_pinned_text())
+    await update.message.reply_text("📌 Закреп создан/обновлён в этом чате ✅")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -1140,17 +1253,26 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("id", whoami))
+    app.add_handler(CommandHandler("pin", pin_here))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(CommandHandler("remind_weight", cmd_remind_weight))
+    app.add_handler(CommandHandler("weight_reminder", cmd_weight_reminder_status))
+    app.add_handler(CommandHandler("refresh", cmd_refresh))
+    app.add_handler(CommandHandler("help", cmd_help))
+    
 
     if app.job_queue is not None:
         app.job_queue.run_repeating(reminder_job, interval=REMINDER_CHECK_MIN * 60, first=60)
         app.job_queue.run_repeating(care_reminder_job, interval=REMINDER_CHECK_MIN * 60, first=120)
         app.job_queue.run_repeating(pinned_refresh_job, interval=PIN_REFRESH_SEC, first=20)
+        app.job_queue.run_repeating(weekly_weight_reminder_job, interval=60 * 60, first=300
+)
     else:
         print('⚠️ JobQueue недоступен — установи: pip install "python-telegram-bot[job-queue]"')
 
     print("Бот запущен. Ctrl+C для остановки.")
+    
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
